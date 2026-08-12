@@ -1,0 +1,17 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Cualquiera con el link de tu sitio puede leer y escribir el documento
+    // de la flota. El PIN de la app es solo una barrera de uso, no de base
+    // de datos: quien conozca la URL de Firestore podría saltarla. Para uso
+    // interno de un taller esto suele ser suficiente; ver README para
+    // opciones más estrictas.
+    match /taller/flota {
+      allow read, write: if true;
+    }
+    // Guarda la lista de nombres de técnicos que se muestra al iniciar sesión.
+    match /taller/config {
+      allow read, write: if true;
+    }
+  }
+}
