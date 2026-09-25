@@ -6,7 +6,7 @@
 export const ROLE_PINS = {
   tecnico: "1234",
   jefe_taller: "5678",
-  administrador: "9999",
+  administrador: "Copaf1",
 };
 
 export const ROLE_LABELS = {
