@@ -11,9 +11,33 @@ por rol (Técnico / Administrador) protegido por PIN.
 - Una cuenta en Vercel o Netlify (para publicar el sitio, gratis).
 - Opcional: un dominio propio si quieres algo tipo `taller.midominio.com`.
 
+## 2. Crear la base de datos (Firebase, gratis)
 
-## 2.  los PINs de acceso
+1. Ve a https://console.firebase.google.com y crea un proyecto nuevo (el nombre no importa).
+2. En el menú lateral: **Compilación → Firestore Database → Crear base de datos**.
+   Elige el modo que te ofrezca por defecto y cualquier región cercana a tu país.
+3. Ve a **Configuración del proyecto** (ícono de engranaje) → pestaña **Tus apps**
+   → ícono web `</>` → dale un nombre (ej. "taller-drones") → **Registrar app**.
+4. Firebase te muestra un bloque `const firebaseConfig = { ... }`. Copia esos valores.
+5. Abre `src/firebase.js` en este proyecto y reemplaza los valores de ejemplo por
+   los tuyos.
+6. En Firestore, ve a la pestaña **Reglas** y pega el contenido del archivo
+   `firestore.rules` que ya viene en este proyecto. Publica los cambios.
 
+   > **Si ya tenías el proyecto funcionando y solo estás actualizando el
+   > código**, vuelve a pegar `firestore.rules` en la pestaña Reglas y publica
+   > de nuevo — esta versión agrega el documento `taller/inventario` (catálogo
+   > de piezas) y si no actualizas las reglas, esa parte no podrá guardar.
+
+*Nota sobre fotos:* las fotos de los drones se agregan pegando un enlace/URL de
+una imagen ya alojada en algún sitio (Google Drive con enlace público, Google
+Fotos, Imgur, etc.), no subiendo el archivo directamente. Firebase Storage
+(subida real de archivos) requiere activar el plan de pago Blaze — si más
+adelante quieres esa opción, dímelo y lo agregamos.
+
+## 3. Configurar los PINs de acceso
+
+Abre `src/roles.js`:
 
 ```js
 export const ROLE_PINS = {
@@ -23,10 +47,24 @@ export const ROLE_PINS = {
 };
 ```
 
+Cambia esos números por los PIN que quieras usar en tu taller y guarda el archivo
+**antes de publicar el sitio** (ver nota de seguridad más abajo).
 
 El rol **Jefe de taller** es el único, junto con Administrador, que puede firmar
 la verificación final del check de pruebas antes de marcar un dron como Listo.
 
+## 4. Probar en tu computador (opcional pero recomendado)
+
+Abre una terminal en esta carpeta y ejecuta:
+
+```bash
+npm install
+npm run dev
+```
+
+Te dará una dirección como `http://localhost:5173`. Ábrela en el navegador y
+prueba entrar como Técnico y como Administrador, crear un dron, moverlo de
+etapa, etc.
 
 ## 5. Publicarlo en línea
 
@@ -73,6 +111,7 @@ taller-drones/
 │   ├── App.jsx        componente principal (tablero, panel de detalle, login)
 │   ├── firebase.js     configuración de conexión a Firestore
 │   ├── roles.js         PINs y permisos por rol
+│   ├── models.js         lista fija de modelos de equipo (UAS/C-UAS)
 │   ├── main.jsx          punto de entrada de React
 │   └── styles.css        estilos globales
 ├── firestore.rules      reglas de acceso a la base de datos

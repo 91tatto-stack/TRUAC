@@ -13,5 +13,9 @@ service cloud.firestore {
     match /taller/config {
       allow read, write: if true;
     }
+    // Catálogo editable de piezas/insumos e inventario ("Quedan: X").
+    match /taller/inventario {
+      allow read, write: if true;
+    }
   }
 }
