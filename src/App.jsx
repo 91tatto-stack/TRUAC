@@ -3,6 +3,9 @@ import { doc, onSnapshot, setDoc, arrayUnion } from "firebase/firestore";
 import { jsPDF } from "jspdf";
 import { db } from "./firebase.js";
 import { ROLE_PINS, ROLE_LABELS, PERMISSIONS } from "./roles.js";
+import { EQUIPMENT_MODELS, OTHER_MODEL_OPTION } from "./models.js";
+import { INVENTORY_SEED } from "./inventorySeed.js";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, LabelList } from "recharts";
 import {
   Search,
   Wrench,
@@ -16,6 +19,9 @@ import {
   ArrowRight,
   Loader2,
   AlertTriangle,
+  CheckCircle,
+  Info,
+  BarChart3,
   Trash2,
   Radio,
   LogOut,
@@ -30,6 +36,9 @@ import {
   Send,
   Undo2,
   FileDown,
+  Boxes,
+  Pencil,
+  Save,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -56,7 +65,18 @@ const TEST_CHECKLIST = [
 
 const DOC_REF = () => doc(db, "taller", "flota");
 const CONFIG_REF = () => doc(db, "taller", "config");
+const INVENTORY_REF = () => doc(db, "taller", "inventario");
 const SESSION_KEY = "taller-drones:sesion";
+
+// Normaliza un nombre de insumo para poder comparar/agrupar sin que
+// mayúsculas, tildes o espacios extra generen duplicados.
+function normalizeName(name) {
+  return (name || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "");
+}
 
 function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -76,6 +96,12 @@ function fmtDateTime(iso) {
 function daysSince(iso) {
   if (!iso) return 0;
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000));
+}
+function isDispatched(drone) {
+  return (drone.dispatches || []).some((x) => !x.returnDate);
+}
+function openDispatchOf(drone) {
+  return (drone.dispatches || []).find((x) => !x.returnDate);
 }
 
 function generateDispatchPdf(drone, dispatch) {
@@ -356,10 +382,20 @@ function Dashboard({ session, onLogout }) {
   const [drones, setDrones] = useState(null); // null = cargando
   const [saveError, setSaveError] = useState(false);
   const [showNewModal, setShowNewModal] = useState(false);
+  const [showMaterialsPanel, setShowMaterialsPanel] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
   const [logoUrl, setLogoUrl] = useState("");
+  const [inventory, setInventory] = useState([]);
+  const [toast, setToast] = useState(null);
   const saveTimer = useRef(null);
+  const toastTimer = useRef(null);
   const perms = PERMISSIONS[session.role] || PERMISSIONS.tecnico;
+
+  function notify(type, message) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ type, message });
+    toastTimer.current = setTimeout(() => setToast(null), 4000);
+  }
 
   useEffect(() => {
     const unsub = onSnapshot(
@@ -379,8 +415,60 @@ function Dashboard({ session, onLogout }) {
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    const unsub = onSnapshot(
+      INVENTORY_REF(),
+      (snap) => setInventory(snap.exists() ? snap.data().items || [] : []),
+      () => setInventory([])
+    );
+    return () => unsub();
+  }, []);
+
   function updateLogo(url) {
     setDoc(CONFIG_REF(), { logoUrl: url }, { merge: true }).catch(() => {});
+  }
+
+  function persistInventory(next) {
+    setInventory(next);
+    setDoc(INVENTORY_REF(), { items: next }).catch(() => {
+      notify("error", "No se pudo guardar el catálogo de inventario.");
+    });
+  }
+
+  function addInventoryItem({ name, unit, initialQuantity }) {
+    if (!name.trim()) {
+      notify("error", "Escribe el nombre de la pieza o insumo.");
+      return;
+    }
+    const key = normalizeName(name);
+    if (inventory.some((it) => normalizeName(it.name) === key)) {
+      notify("error", "Ya existe una pieza con ese nombre en el catálogo.");
+      return;
+    }
+    const entry = { id: uid(), name: name.trim(), unit: unit.trim() || "u", initialQuantity: Number(initialQuantity) || 0 };
+    persistInventory([...inventory, entry]);
+    notify("success", "Pieza agregada al catálogo.");
+  }
+
+  function updateInventoryItem(itemId, changes) {
+    persistInventory(inventory.map((it) => (it.id === itemId ? { ...it, ...changes } : it)));
+    notify("success", "Catálogo actualizado.");
+  }
+
+  function removeInventoryItem(itemId) {
+    persistInventory(inventory.filter((it) => it.id !== itemId));
+    notify("success", "Pieza eliminada del catálogo.");
+  }
+
+  function importInventorySeed() {
+    const existingKeys = new Set(inventory.map((it) => normalizeName(it.name)));
+    const toAdd = INVENTORY_SEED.filter((it) => !existingKeys.has(normalizeName(it.name))).map((it) => ({ ...it, id: uid() }));
+    if (toAdd.length === 0) {
+      notify("info", "El catálogo del Excel ya está cargado por completo.");
+      return;
+    }
+    persistInventory([...inventory, ...toAdd]);
+    notify("success", `Se cargaron ${toAdd.length} piezas del catálogo del Excel.`);
   }
 
   const persist = useCallback((next) => {
@@ -391,6 +479,7 @@ function Dashboard({ session, onLogout }) {
         setSaveError(false);
       } catch {
         setSaveError(true);
+        notify("error", "No se pudo guardar el cambio. Revisa tu conexión a internet.");
       }
     }, 200);
   }, []);
@@ -404,6 +493,14 @@ function Dashboard({ session, onLogout }) {
   }
 
   function addDrone({ name, model, origin, photoUrl, notes }) {
+    if (!name.trim()) {
+      notify("error", "El identificador del dron es obligatorio.");
+      return;
+    }
+    if (!model.trim()) {
+      notify("error", "Escribe el modelo del equipo (elegiste 'Otro' pero no lo especificaste).");
+      return;
+    }
     const now = new Date().toISOString();
     const drone = {
       id: uid(),
@@ -422,19 +519,24 @@ function Dashboard({ session, onLogout }) {
       dispatches: [],
       history: [
         { id: uid(), date: now, type: "created", text: "Dron ingresado al taller", technician: session.name },
-        ...(notes && notes.trim() ? [{ id: uid(), date: now, type: "note", text: notes.trim(), technician: session.name }] : []),
+        ...(notes && notes.trim() ? [{ id: uid(), date: now, type: "note", text: notes.trim(), technician: session.name, stage: "diagnostico" }] : []),
       ],
     };
     updateDrones((prev) => [drone, ...prev]);
     setShowNewModal(false);
+    notify("success", `${drone.name} fue registrado en Diagnóstico.`);
   }
 
   function moveStage(droneId, targetStageId) {
     const now = new Date().toISOString();
+    let blocked = false;
     updateDrones((prev) =>
       prev.map((d) => {
         if (d.id !== droneId || d.stage === targetStageId) return d;
-        if (targetStageId === "listo" && !d.verification) return d; // requiere check de pruebas firmado
+        if (targetStageId === "listo" && !d.verification) {
+          blocked = true;
+          return d; // requiere check de pruebas firmado
+        }
         const label = STAGES.find((s) => s.id === targetStageId)?.label;
         return {
           ...d,
@@ -445,6 +547,7 @@ function Dashboard({ session, onLogout }) {
         };
       })
     );
+    if (blocked) notify("error", "Falta firmar el check de pruebas antes de marcarlo como Listo.");
   }
 
   function toggleChecklistItem(droneId, itemId) {
@@ -458,11 +561,15 @@ function Dashboard({ session, onLogout }) {
 
   function verifyDrone(droneId) {
     const now = new Date().toISOString();
+    let missing = false;
     updateDrones((prev) =>
       prev.map((d) => {
         if (d.id !== droneId) return d;
         const allChecked = TEST_CHECKLIST.every((item) => d.testChecklist?.[item.id]);
-        if (!allChecked) return d;
+        if (!allChecked) {
+          missing = true;
+          return d;
+        }
         return {
           ...d,
           verification: { approvedBy: session.name, role: session.role, date: now },
@@ -473,6 +580,8 @@ function Dashboard({ session, onLogout }) {
         };
       })
     );
+    if (missing) notify("error", "Debes marcar los 6 puntos del check de pruebas antes de firmar.");
+    else notify("success", "Verificación firmada correctamente.");
   }
 
   function unverifyDrone(droneId) {
@@ -491,14 +600,19 @@ function Dashboard({ session, onLogout }) {
   }
 
   function addNote(droneId, text) {
+    if (!text.trim()) {
+      notify("error", "Escribe algo antes de guardar la nota.");
+      return;
+    }
     const now = new Date().toISOString();
     updateDrones((prev) =>
       prev.map((d) =>
         d.id !== droneId
           ? d
-          : { ...d, history: [{ id: uid(), date: now, type: "note", text, technician: session.name, stage: d.stage }, ...d.history] }
+          : { ...d, history: [{ id: uid(), date: now, type: "note", text: text.trim(), technician: session.name, stage: d.stage }, ...d.history] }
       )
     );
+    notify("success", "Nota guardada.");
   }
 
   function assignTechnician(droneId, name) {
@@ -536,6 +650,14 @@ function Dashboard({ session, onLogout }) {
   }
 
   function addMaterial(droneId, { name, quantity, unit }) {
+    if (!name.trim()) {
+      notify("error", "Escribe el nombre del insumo.");
+      return;
+    }
+    if (!quantity || quantity <= 0) {
+      notify("error", "La cantidad debe ser mayor a 0.");
+      return;
+    }
     const now = new Date().toISOString();
     updateDrones((prev) =>
       prev.map((d) => {
@@ -551,6 +673,7 @@ function Dashboard({ session, onLogout }) {
         };
       })
     );
+    notify("success", "Insumo registrado.");
   }
 
   function removeMaterial(droneId, materialId) {
@@ -561,6 +684,10 @@ function Dashboard({ session, onLogout }) {
   }
 
   function addLabor(droneId, { hours, description }) {
+    if (!hours || hours <= 0) {
+      notify("error", "Escribe cuántas horas trabajaste (mayor a 0).");
+      return;
+    }
     const now = new Date().toISOString();
     updateDrones((prev) =>
       prev.map((d) => {
@@ -576,6 +703,7 @@ function Dashboard({ session, onLogout }) {
         };
       })
     );
+    notify("success", "Horas registradas.");
   }
 
   function removeLabor(droneId, laborId) {
@@ -586,12 +714,24 @@ function Dashboard({ session, onLogout }) {
   }
 
   function registerDispatch(droneId, oficio) {
+    if (!oficio.trim()) {
+      notify("error", "Escribe el número de oficio antes de registrar la salida.");
+      return;
+    }
     const now = new Date().toISOString();
+    let result = "ok";
     updateDrones((prev) =>
       prev.map((d) => {
-        if (d.id !== droneId || d.stage !== "listo") return d;
+        if (d.id !== droneId) return d;
+        if (d.stage !== "listo") {
+          result = "not_ready";
+          return d;
+        }
         const open = (d.dispatches || []).some((x) => !x.returnDate);
-        if (open) return d;
+        if (open) {
+          result = "already_open";
+          return d;
+        }
         const entry = { id: uid(), oficio: oficio.trim(), dispatchDate: now, dispatchBy: session.name, returnDate: null, returnBy: null };
         return {
           ...d,
@@ -603,6 +743,9 @@ function Dashboard({ session, onLogout }) {
         };
       })
     );
+    if (result === "not_ready") notify("error", "El dron debe estar en la etapa Listo para registrar la salida.");
+    else if (result === "already_open") notify("error", "Este dron ya tiene una salida registrada sin retorno.");
+    else notify("success", `Salida registrada con el oficio ${oficio.trim()}.`);
   }
 
   function registerReturn(droneId, dispatchId) {
@@ -622,7 +765,9 @@ function Dashboard({ session, onLogout }) {
         };
       })
     );
+    notify("success", "Retorno al taller registrado.");
   }
+
 
   function removeDrone(droneId) {
     if (!perms.canDelete) return;
@@ -632,19 +777,34 @@ function Dashboard({ session, onLogout }) {
 
   const loading = drones === null;
   const list = drones || [];
+  const activeList = list.filter((d) => !isDispatched(d));
+  const dispatchedList = list.filter((d) => isDispatched(d));
   const counts = STAGES.reduce((acc, s) => {
-    acc[s.id] = list.filter((d) => d.stage === s.id).length;
+    acc[s.id] = activeList.filter((d) => d.stage === s.id).length;
     return acc;
   }, {});
   const selected = list.find((d) => d.id === selectedId) || null;
+  const materialsUsedByKey = (() => {
+    const map = new Map();
+    list.forEach((d) =>
+      (d.materials || []).forEach((m) => {
+        const key = normalizeName(m.name);
+        if (!key) return;
+        map.set(key, (map.get(key) || 0) + (Number(m.quantity) || 0));
+      })
+    );
+    return map;
+  })();
 
   return (
     <div style={styles.appShell}>
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
       <Header
         session={session}
         onLogout={onLogout}
         total={list.length}
         onNew={() => setShowNewModal(true)}
+        onOpenMaterialsPanel={() => setShowMaterialsPanel(true)}
         saveError={saveError}
         logoUrl={logoUrl}
         canEditLogo={perms.canDelete}
@@ -663,17 +823,54 @@ function Dashboard({ session, onLogout }) {
       ) : (
         <div style={styles.board}>
           {STAGES.map((stage) => (
-            <StageColumn key={stage.id} stage={stage} drones={list.filter((d) => d.stage === stage.id)} onOpen={setSelectedId} />
+            <StageColumn key={stage.id} stage={stage} drones={activeList.filter((d) => d.stage === stage.id)} onOpen={setSelectedId} />
           ))}
         </div>
       )}
 
+      {dispatchedList.length > 0 && (
+        <div style={styles.dispatchedSection}>
+          <div style={styles.dispatchedHeader}>
+            <Send size={13} color="#D4AF37" />
+            Fuera del taller — entregados ({dispatchedList.length})
+          </div>
+          <div style={styles.dispatchedGrid}>
+            {dispatchedList.map((d) => {
+              const dp = openDispatchOf(d);
+              return (
+                <div key={d.id} style={styles.dispatchedCard} onClick={() => setSelectedId(d.id)}>
+                  <div style={styles.cardName}>{d.name}</div>
+                  <div style={styles.cardModel}>{d.model}</div>
+                  <div style={styles.dispatchedMeta}>
+                    Oficio {dp.oficio} · salió {fmtDate(dp.dispatchDate)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {showNewModal && <NewDroneModal onClose={() => setShowNewModal(false)} onCreate={addDrone} defaultTech={session.name} />}
+      {showMaterialsPanel && (
+        <AnalyticsModal
+          drones={list}
+          inventory={inventory}
+          canEditInventory={perms.canDelete}
+          onAddInventoryItem={addInventoryItem}
+          onUpdateInventoryItem={updateInventoryItem}
+          onRemoveInventoryItem={removeInventoryItem}
+          onImportSeed={importInventorySeed}
+          onClose={() => setShowMaterialsPanel(false)}
+        />
+      )}
 
       {selected && (
         <DetailPanel
           drone={selected}
           perms={perms}
+          inventory={inventory}
+          materialsUsedByKey={materialsUsedByKey}
           onClose={() => setSelectedId(null)}
           onMoveStage={moveStage}
           onAddNote={addNote}
@@ -700,7 +897,7 @@ function Dashboard({ session, onLogout }) {
 // Header + assembly line
 // ---------------------------------------------------------------------------
 
-function Header({ session, onLogout, total, onNew, saveError, logoUrl, canEditLogo, onEditLogo }) {
+function Header({ session, onLogout, total, onNew, onOpenMaterialsPanel, saveError, logoUrl, canEditLogo, onEditLogo }) {
   function editLogo() {
     const url = window.prompt("Pega la URL de la imagen del logo (déjalo vacío para quitarlo):", logoUrl || "");
     if (url !== null) onEditLogo(url.trim());
@@ -739,6 +936,9 @@ function Header({ session, onLogout, total, onNew, saveError, logoUrl, canEditLo
           {session.role === "administrador" ? <ShieldCheck size={13} /> : session.role === "jefe_taller" ? <ClipboardCheck size={13} /> : <User size={13} />}
           {session.name} · {ROLE_LABELS[session.role]}
         </div>
+        <button style={styles.iconButton} onClick={onOpenMaterialsPanel} title="Análisis de insumos">
+          <BarChart3 size={14} />
+        </button>
         <button style={styles.iconButton} onClick={onLogout} title="Cerrar sesión">
           <LogOut size={14} />
         </button>
@@ -753,6 +953,25 @@ function Header({ session, onLogout, total, onNew, saveError, logoUrl, canEditLo
 
 function FlagStripe() {
   return <div style={styles.flagStripe} />;
+}
+
+function Toast({ toast, onDismiss }) {
+  if (!toast) return null;
+  const config = {
+    error: { icon: AlertTriangle, color: "#F09595", bg: "#3A1616", border: "#5C2323" },
+    success: { icon: CheckCircle, color: "#9EE8B8", bg: "#173A28", border: "#2A6B4A" },
+    info: { icon: Info, color: "#8EC5F5", bg: "#16263A", border: "#26466B" },
+  }[toast.type] || { icon: Info, color: "#8EC5F5", bg: "#16263A", border: "#26466B" };
+  const Icon = config.icon;
+  return (
+    <div style={{ ...styles.toast, background: config.bg, borderColor: config.border }}>
+      <Icon size={15} color={config.color} style={{ flexShrink: 0 }} />
+      <span style={{ ...styles.toastText, color: config.color }}>{toast.message}</span>
+      <button style={styles.toastClose} onClick={onDismiss}>
+        <X size={13} color={config.color} />
+      </button>
+    </div>
+  );
 }
 
 function AssemblyLine({ counts }) {
@@ -862,13 +1081,465 @@ function EmptyState({ onNew }) {
 // New drone modal
 // ---------------------------------------------------------------------------
 
+function AnalyticsModal({
+  drones,
+  onClose,
+  inventory = [],
+  canEditInventory = false,
+  onAddInventoryItem,
+  onUpdateInventoryItem,
+  onRemoveInventoryItem,
+  onImportSeed,
+}) {
+  const [tab, setTab] = useState("materials");
+
+  // Mapa normalizado insumo -> catálogo (para cruzar con lo usado y calcular "quedan").
+  const inventoryByKey = (() => {
+    const map = new Map();
+    inventory.forEach((it) => map.set(normalizeName(it.name), it));
+    return map;
+  })();
+
+  const materialStats = (() => {
+    const map = new Map();
+    drones.forEach((d) => {
+      (d.materials || []).forEach((m) => {
+        const key = normalizeName(m.name);
+        if (!key) return;
+        if (!map.has(key)) {
+          map.set(key, { label: m.name.trim(), occurrences: 0, totalQuantity: 0, unit: m.unit || "u", drones: new Set(), lastDate: m.date });
+        }
+        const entry = map.get(key);
+        entry.occurrences += 1;
+        entry.totalQuantity += Number(m.quantity) || 0;
+        entry.drones.add(d.name);
+        if (new Date(m.date) > new Date(entry.lastDate)) entry.lastDate = m.date;
+      });
+    });
+    // Cruza cada insumo usado con su catálogo para calcular cuántas piezas quedan.
+    map.forEach((entry, key) => {
+      const item = inventoryByKey.get(key);
+      entry.remaining = item ? item.initialQuantity - entry.totalQuantity : null;
+    });
+    return Array.from(map.values()).sort((a, b) => b.occurrences - a.occurrences);
+  })();
+
+  // Cuánto se ha usado de cada pieza del catálogo, para la pestaña Inventario
+  // (incluye piezas del catálogo que aún no se han usado, con 0).
+  const usedByKey = (() => {
+    const map = new Map();
+    materialStats.forEach((s) => map.set(normalizeName(s.label), s.totalQuantity));
+    return map;
+  })();
+
+  const laborByTech = (() => {
+    const map = new Map();
+    drones.forEach((d) => {
+      (d.laborLog || []).forEach((l) => {
+        const key = (l.technician || "Sin asignar").trim();
+        if (!map.has(key)) map.set(key, { label: key, hours: 0, occurrences: 0, drones: new Set(), lastDate: l.date });
+        const entry = map.get(key);
+        entry.hours += Number(l.hours) || 0;
+        entry.occurrences += 1;
+        entry.drones.add(d.name);
+        if (new Date(l.date) > new Date(entry.lastDate)) entry.lastDate = l.date;
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => b.hours - a.hours);
+  })();
+
+  const laborByModel = (() => {
+    const map = new Map();
+    drones.forEach((d) => {
+      const key = (d.model || "Sin modelo").trim();
+      const totalHours = (d.laborLog || []).reduce((sum, l) => sum + (Number(l.hours) || 0), 0);
+      if (totalHours === 0) return;
+      if (!map.has(key)) map.set(key, { label: key, hours: 0, occurrences: 0, drones: new Set() });
+      const entry = map.get(key);
+      entry.hours += totalHours;
+      entry.occurrences += (d.laborLog || []).length;
+      entry.drones.add(d.name);
+    });
+    return Array.from(map.values()).sort((a, b) => b.hours - a.hours);
+  })();
+
+  // Cuántas veces llegó cada dron a "Listo" — para ver cuáles requieren mantenimiento recurrente.
+  const droneMaintenanceStats = (() => {
+    const map = new Map();
+    drones.forEach((d) => {
+      const count = (d.history || []).filter((h) => h.type === "stage_change" && h.text === "Movido a Listo").length;
+      if (count === 0) return;
+      map.set(d.id, { label: `${d.name}${d.model ? ` (${d.model})` : ""}`, value: count });
+    });
+    return Array.from(map.values()).sort((a, b) => b.value - a.value);
+  })();
+
+  // En cuántos drones distintos trabajó cada técnico (notas, insumos, horas, asignación o verificación).
+  const techDroneStats = (() => {
+    const map = new Map();
+    drones.forEach((d) => {
+      const techs = new Set();
+      if (d.technician) techs.add(d.technician);
+      (d.history || []).forEach((h) => h.technician && techs.add(h.technician));
+      techs.forEach((t) => {
+        if (!map.has(t)) map.set(t, new Set());
+        map.get(t).add(d.id);
+      });
+    });
+    return Array.from(map.entries())
+      .map(([label, set]) => ({ label, value: set.size }))
+      .sort((a, b) => b.value - a.value);
+  })();
+
+  // Tiempo promedio en el taller (ingreso -> último mantenimiento completado).
+  const avgDaysInWorkshop = (() => {
+    const finished = drones.filter((d) => d.lastMaintenanceDate);
+    if (finished.length === 0) return null;
+    const totalDays = finished.reduce((sum, d) => sum + Math.max(0, Math.floor((new Date(d.lastMaintenanceDate) - new Date(d.entryDate)) / 86400000)), 0);
+    return Math.round((totalDays / finished.length) * 10) / 10;
+  })();
+
+  // Drones por etapa actual (incluye los que están fuera del taller entregados, sin importar etapa).
+  const stageCountStats = STAGES.map((s) => ({
+    label: s.label,
+    value: drones.filter((d) => d.stage === s.id).length,
+    color: s.accent,
+  }));
+
+  const TABS = [
+    { id: "charts", label: "Gráficas", icon: BarChart3 },
+    { id: "materials", label: "Insumos más usados", icon: Package },
+    { id: "techHours", label: "Horas por técnico", icon: User },
+    { id: "modelHours", label: "Horas por tipo de equipo", icon: BarChart3 },
+    { id: "inventory", label: "Inventario", icon: Boxes },
+  ];
+
+  // Barra horizontal genérica para la pestaña de Gráficas — un solo color por
+  // gráfico (una sola serie), etiquetas legibles y tooltip al pasar el mouse.
+  function RankedBarChart({ data, color, unit, maxItems = 8 }) {
+    const rows = data.slice(0, maxItems);
+    if (rows.length === 0) return <div style={styles.lockedHint}>Aún no hay datos suficientes.</div>;
+    const height = Math.max(120, rows.length * 40);
+    return (
+      <ResponsiveContainer width="100%" height={height}>
+        <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 28, bottom: 4, left: 4 }} barCategoryGap={10}>
+          <CartesianGrid horizontal={false} stroke="#1E3350" />
+          <XAxis type="number" tick={{ fill: "#8B92A3", fontSize: 11 }} axisLine={{ stroke: "#1E3350" }} tickLine={false} allowDecimals={false} />
+          <YAxis
+            type="category"
+            dataKey="label"
+            width={150}
+            tick={{ fill: "#C7CCD9", fontSize: 11 }}
+            axisLine={{ stroke: "#1E3350" }}
+            tickLine={false}
+          />
+          <Tooltip
+            cursor={{ fill: "rgba(255,255,255,0.04)" }}
+            contentStyle={{ background: "#0F1B2E", border: "1px solid #1E3350", borderRadius: 8, fontSize: 12 }}
+            labelStyle={{ color: "#C7CCD9" }}
+            itemStyle={{ color }}
+            formatter={(value) => [`${value}${unit ? ` ${unit}` : ""}`, ""]}
+          />
+          <Bar dataKey="value" fill={color} radius={[0, 4, 4, 0]} maxBarSize={22}>
+            <LabelList dataKey="value" position="right" fill="#C7CCD9" fontSize={11} formatter={(v) => `${v}${unit ? ` ${unit}` : ""}`} />
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  function ChartCard({ title, hint, children }) {
+    return (
+      <div style={styles.chartCard}>
+        <div style={styles.chartCardTitle}>{title}</div>
+        {children}
+        {hint && <div style={{ ...styles.formHint, marginTop: 6 }}>{hint}</div>}
+      </div>
+    );
+  }
+
+  function renderList(stats, kind) {
+    if (stats.length === 0) return <div style={styles.lockedHint}>Aún no hay datos suficientes para mostrar esta lista.</div>;
+    const maxValue = kind === "materials" ? stats[0].occurrences : stats[0].hours;
+    return (
+      <div style={styles.analyticsList}>
+        {stats.map((s, i) => (
+          <div key={s.label} style={styles.analyticsRow}>
+            <div style={styles.analyticsRank}>#{i + 1}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={styles.analyticsName}>{s.label}</div>
+              <div style={styles.analyticsBarTrack}>
+                <div
+                  style={{
+                    ...styles.analyticsBarFill,
+                    width: `${((kind === "materials" ? s.occurrences : s.hours) / (maxValue || 1)) * 100}%`,
+                  }}
+                />
+              </div>
+              <div style={styles.analyticsMeta}>
+                {kind === "materials" ? (
+                  <>
+                    {s.occurrences} {s.occurrences === 1 ? "vez registrado" : "veces registrado"} · {s.totalQuantity} {s.unit} en total ·{" "}
+                    {s.drones.size} {s.drones.size === 1 ? "dron" : "drones"} distintos · última vez {fmtDate(s.lastDate)}
+                    {s.remaining !== null && s.remaining !== undefined && (
+                      <>
+                        {" · "}
+                        <span style={{ color: s.remaining <= 0 ? "#F5877A" : s.remaining <= 3 ? "#F5A623" : "#9EE8B8", fontWeight: 600 }}>
+                          Quedan: {s.remaining} {s.unit}
+                        </span>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {s.hours}h en total · {s.occurrences} {s.occurrences === 1 ? "registro" : "registros"} · {s.drones.size}{" "}
+                    {s.drones.size === 1 ? "dron" : "drones"} distintos
+                    {s.lastDate ? ` · última vez ${fmtDate(s.lastDate)}` : ""}
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={{ ...styles.modal, ...styles.analyticsModal }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div>
+            <span style={styles.modalTitle}>Análisis de la flota</span>
+            <div style={styles.panelModel}>Datos acumulados de todos los drones</div>
+          </div>
+          <button style={styles.iconButton} onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div style={styles.stageTabRow}>
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                style={{
+                  ...styles.stageTabBtn,
+                  borderColor: active ? "#D4AF37" : "#1E3350",
+                  color: active ? "#D4AF37" : "#8B92A3",
+                  background: active ? "#2A2405" : "transparent",
+                }}
+                onClick={() => setTab(t.id)}
+              >
+                <Icon size={12} />
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {tab === "charts" && (
+          <div style={styles.chartsGrid}>
+            <ChartCard title="Horas trabajadas por técnico" hint="Suma de tiempo hombre registrado por cada técnico en toda la flota.">
+              <RankedBarChart data={laborByTech.map((s) => ({ label: s.label, value: s.hours }))} color="#4C8DFF" unit="h" />
+            </ChartCard>
+            <ChartCard title="Piezas / insumos más utilizados" hint="Top de insumos por número de veces registrados (no por cantidad).">
+              <RankedBarChart data={materialStats.map((s) => ({ label: s.label, value: s.occurrences }))} color="#D4AF37" maxItems={10} />
+            </ChartCard>
+            <ChartCard title="Horas por tipo de equipo" hint="Tiempo hombre acumulado según el modelo del dron.">
+              <RankedBarChart data={laborByModel.map((s) => ({ label: s.label, value: s.hours }))} color="#5EC8D8" unit="h" />
+            </ChartCard>
+            <ChartCard title="Drones con más mantenimientos" hint="Cuántas veces cada dron ha llegado a la etapa Listo — útil para detectar fallas recurrentes.">
+              <RankedBarChart data={droneMaintenanceStats} color="#4ADE80" />
+            </ChartCard>
+            <ChartCard title="Técnicos con más drones atendidos" hint="En cuántos drones distintos ha trabajado cada técnico (asignación, notas, insumos o tiempo hombre).">
+              <RankedBarChart data={techDroneStats} color="#F5A623" />
+            </ChartCard>
+            <ChartCard title="Drones por etapa actual" hint="Distribución de toda la flota, incluyendo los que están fuera del taller entregados.">
+              <RankedBarChart data={stageCountStats} color="#D4AF37" maxItems={4} />
+            </ChartCard>
+            {avgDaysInWorkshop !== null && (
+              <ChartCard title="Tiempo promedio en el taller" hint="Días entre el ingreso y el último mantenimiento completado, promediado entre los drones que ya pasaron por Listo.">
+                <div style={styles.statTile}>
+                  <div style={styles.statTileValue}>{avgDaysInWorkshop}</div>
+                  <div style={styles.statTileLabel}>días en promedio</div>
+                </div>
+              </ChartCard>
+            )}
+          </div>
+        )}
+        {tab === "materials" && renderList(materialStats, "materials")}
+        {tab === "techHours" && renderList(laborByTech, "hours")}
+        {tab === "modelHours" && renderList(laborByModel, "hours")}
+        {tab === "inventory" && (
+          <InventoryTab
+            inventory={inventory}
+            usedByKey={usedByKey}
+            canEdit={canEditInventory}
+            onAdd={onAddInventoryItem}
+            onUpdate={onUpdateInventoryItem}
+            onRemove={onRemoveInventoryItem}
+            onImportSeed={onImportSeed}
+          />
+        )}
+
+        {tab !== "charts" && (
+          <div style={{ ...styles.formHint, marginTop: 14 }}>
+            {tab === "materials"
+              ? "Útil para detectar piezas que fallan seguido y priorizar compras o revisar causas recurrentes."
+              : tab === "techHours"
+              ? "Útil para ver la carga de trabajo real de cada técnico."
+              : tab === "modelHours"
+              ? "Útil para ver qué modelos de equipo consumen más tiempo de mantenimiento."
+              : "Catálogo de piezas e insumos del taller. La cantidad inicial se descuenta con cada insumo registrado en un dron para mostrar cuánto queda."}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Inventario — catálogo editable de piezas/insumos con cantidades restantes
+// ---------------------------------------------------------------------------
+
+function InventoryTab({ inventory, usedByKey, canEdit, onAdd, onUpdate, onRemove, onImportSeed }) {
+  const [newName, setNewName] = useState("");
+  const [newUnit, setNewUnit] = useState("u");
+  const [newQty, setNewQty] = useState("0");
+  const [editingId, setEditingId] = useState(null);
+  const [editQty, setEditQty] = useState("");
+
+  const sorted = inventory.slice().sort((a, b) => a.name.localeCompare(b.name, "es"));
+
+  return (
+    <div>
+      {canEdit && onImportSeed && (
+        <button style={{ ...styles.ghostBtn, marginBottom: 10 }} onClick={onImportSeed}>
+          <FileDown size={13} />
+          Cargar catálogo desde Excel ({INVENTORY_SEED.length} piezas)
+        </button>
+      )}
+      {sorted.length === 0 ? (
+        <div style={styles.lockedHint}>
+          Aún no hay piezas en el catálogo{canEdit ? ". Agrega la primera abajo o carga el catálogo del Excel." : "; pídele a un administrador que lo cargue."}
+        </div>
+      ) : (
+        <div style={styles.analyticsList}>
+          {sorted.map((item) => {
+            const used = usedByKey.get(normalizeName(item.name)) || 0;
+            const remaining = item.initialQuantity - used;
+            const isEditing = editingId === item.id;
+            return (
+              <div key={item.id} style={styles.analyticsRow}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={styles.analyticsName}>{item.name}</div>
+                  <div style={styles.analyticsMeta}>
+                    {isEditing ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        Cantidad inicial:
+                        <input
+                          autoFocus
+                          type="number"
+                          min="0"
+                          value={editQty}
+                          onChange={(e) => setEditQty(e.target.value)}
+                          style={{ ...styles.formInput, width: 70, padding: "4px 8px" }}
+                        />
+                        {item.unit}
+                        <button
+                          style={styles.logDeleteBtn}
+                          title="Guardar"
+                          onClick={() => {
+                            onUpdate(item.id, { initialQuantity: Number(editQty) || 0 });
+                            setEditingId(null);
+                          }}
+                        >
+                          <Save size={13} color="#9EE8B8" />
+                        </button>
+                        <button style={styles.logDeleteBtn} title="Cancelar" onClick={() => setEditingId(null)}>
+                          <X size={13} color="#8B92A3" />
+                        </button>
+                      </span>
+                    ) : (
+                      <>
+                        Cantidad inicial: {item.initialQuantity} {item.unit} · usadas: {used} {item.unit} ·{" "}
+                        <span style={{ color: remaining <= 0 ? "#F5877A" : remaining <= 3 ? "#F5A623" : "#9EE8B8", fontWeight: 600 }}>
+                          Quedan: {remaining} {item.unit}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {canEdit && !isEditing && (
+                  <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                    <button
+                      style={styles.logDeleteBtn}
+                      title="Editar cantidad"
+                      onClick={() => {
+                        setEditingId(item.id);
+                        setEditQty(String(item.initialQuantity));
+                      }}
+                    >
+                      <Pencil size={13} color="#8B92A3" />
+                    </button>
+                    <button style={styles.logDeleteBtn} title="Quitar del catálogo" onClick={() => onRemove(item.id)}>
+                      <Trash2 size={13} color="#F5877A" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {canEdit && (
+        <div style={{ ...styles.logForm, marginTop: 14 }}>
+          <div style={styles.subBlockLabel}>Agregar pieza al catálogo</div>
+          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Nombre de la pieza / insumo *" style={styles.formInput} />
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={newQty}
+              onChange={(e) => setNewQty(e.target.value)}
+              placeholder="Cantidad inicial"
+              style={{ ...styles.formInput, width: 110 }}
+            />
+            <input value={newUnit} onChange={(e) => setNewUnit(e.target.value)} placeholder="unidad" style={{ ...styles.formInput, width: 90 }} />
+            <button
+              style={{ ...styles.ghostBtn, flex: 1, opacity: newName.trim() ? 1 : 0.4 }}
+              disabled={!newName.trim()}
+              onClick={() => {
+                onAdd({ name: newName, unit: newUnit, initialQuantity: newQty });
+                setNewName("");
+                setNewUnit("u");
+                setNewQty("0");
+              }}
+            >
+              <Plus size={13} />
+              Agregar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NewDroneModal({ onClose, onCreate, defaultTech }) {
   const [name, setName] = useState("");
-  const [model, setModel] = useState("");
+  const [model, setModel] = useState(EQUIPMENT_MODELS[0]);
+  const [customModel, setCustomModel] = useState("");
   const [origin, setOrigin] = useState("");
   const [photoUrl, setPhotoUrl] = useState("");
   const [notes, setNotes] = useState("");
-  const canSubmit = name.trim().length > 0;
+  const isOther = model === OTHER_MODEL_OPTION;
+  const finalModel = isOther ? customModel : model;
 
   return (
     <div style={styles.overlay} onClick={onClose}>
@@ -880,12 +1551,28 @@ function NewDroneModal({ onClose, onCreate, defaultTech }) {
           </button>
         </div>
         <div style={styles.formField}>
-          <label style={styles.formLabel}>Identificador</label>
+          <label style={styles.formLabel}>Identificador *</label>
           <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej: DJI-014 / Cliente Andina Films" style={styles.formInput} />
         </div>
         <div style={styles.formField}>
-          <label style={styles.formLabel}>Modelo</label>
-          <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="Ej: DJI Mavic 3 Enterprise" style={styles.formInput} />
+          <label style={styles.formLabel}>Tipo de equipo / modelo *</label>
+          <select value={model} onChange={(e) => setModel(e.target.value)} style={styles.formInput}>
+            {EQUIPMENT_MODELS.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+            <option value={OTHER_MODEL_OPTION}>{OTHER_MODEL_OPTION}</option>
+          </select>
+          {isOther && (
+            <input
+              autoFocus
+              value={customModel}
+              onChange={(e) => setCustomModel(e.target.value)}
+              placeholder="Escribe el modelo"
+              style={{ ...styles.formInput, marginTop: 6 }}
+            />
+          )}
         </div>
         <div style={styles.formField}>
           <label style={styles.formLabel}>Procedencia / cliente</label>
@@ -903,9 +1590,8 @@ function NewDroneModal({ onClose, onCreate, defaultTech }) {
         <div style={styles.formFooter}>
           <span style={styles.formHint}>Entrará en la etapa Diagnóstico, técnico: {defaultTech}</span>
           <button
-            style={{ ...styles.newButton, opacity: canSubmit ? 1 : 0.4, cursor: canSubmit ? "pointer" : "default" }}
-            disabled={!canSubmit}
-            onClick={() => canSubmit && onCreate({ name, model, origin, photoUrl, notes })}
+            style={styles.newButton}
+            onClick={() => onCreate({ name, model: finalModel, origin, photoUrl, notes })}
           >
             <Plus size={15} />
             Registrar
@@ -920,9 +1606,13 @@ function NewDroneModal({ onClose, onCreate, defaultTech }) {
 // Detail panel
 // ---------------------------------------------------------------------------
 
+const OTHER_MATERIAL_OPTION = "Otro / no está en el catálogo";
+
 function DetailPanel({
   drone,
   perms,
+  inventory = [],
+  materialsUsedByKey = new Map(),
   onClose,
   onMoveStage,
   onAddNote,
@@ -948,9 +1638,13 @@ function DetailPanel({
   const [editingPhoto, setEditingPhoto] = useState(false);
   const [photoDraft, setPhotoDraft] = useState(drone.photoUrl || "");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [matCatalogChoice, setMatCatalogChoice] = useState("");
   const [matName, setMatName] = useState("");
   const [matQty, setMatQty] = useState("1");
   const [matUnit, setMatUnit] = useState("u");
+  const hasCatalog = inventory.length > 0;
+  const selectedCatalogValue = matCatalogChoice || (hasCatalog ? inventory[0].name : OTHER_MATERIAL_OPTION);
+  const isOtherMaterial = !hasCatalog || selectedCatalogValue === OTHER_MATERIAL_OPTION;
   const [laborHours, setLaborHours] = useState("");
   const [laborDesc, setLaborDesc] = useState("");
   const [activeTab, setActiveTab] = useState(drone.stage);
@@ -967,13 +1661,13 @@ function DetailPanel({
     setConfirmDelete(false);
     setActiveTab(drone.stage);
     setOficioDraft("");
+    setMatCatalogChoice("");
+    setMatName("");
   }, [drone.id]);
 
   function submitNote() {
-    const text = noteDraft.trim();
-    if (!text) return;
-    onAddNote(drone.id, text);
-    setNoteDraft("");
+    onAddNote(drone.id, noteDraft);
+    if (noteDraft.trim()) setNoteDraft("");
   }
 
   return (
@@ -1139,15 +1833,14 @@ function DetailPanel({
               <input
                 value={oficioDraft}
                 onChange={(e) => setOficioDraft(e.target.value)}
-                placeholder="Número de oficio (ej: OFICIO-2026-0142)"
+                placeholder="Número de oficio * (ej: OFICIO-2026-0142)"
                 style={styles.formInput}
               />
               <button
                 style={{ ...styles.advanceBtn, width: "100%", marginTop: 6, opacity: oficioDraft.trim() ? 1 : 0.4 }}
-                disabled={!oficioDraft.trim()}
                 onClick={() => {
                   onRegisterDispatch(drone.id, oficioDraft);
-                  setOficioDraft("");
+                  if (oficioDraft.trim()) setOficioDraft("");
                 }}
               >
                 <Send size={13} />
@@ -1297,7 +1990,7 @@ function DetailPanel({
                         style={{ ...styles.formTextarea, marginTop: 8 }}
                         rows={2}
                       />
-                      <button style={{ ...styles.advanceBtn, opacity: noteDraft.trim() ? 1 : 0.4, marginTop: 8 }} disabled={!noteDraft.trim()} onClick={submitNote}>
+                      <button style={{ ...styles.advanceBtn, opacity: noteDraft.trim() ? 1 : 0.4, marginTop: 8 }} onClick={submitNote}>
                         <MessageSquare size={13} />
                         Guardar nota
                       </button>
@@ -1330,7 +2023,42 @@ function DetailPanel({
                   </div>
                   {isCurrentStage && (
                     <div style={styles.logForm}>
-                      <input value={matName} onChange={(e) => setMatName(e.target.value)} placeholder="Insumo (ej: hélice, batería 4S)" style={styles.formInput} />
+                      {hasCatalog ? (
+                        <>
+                          <select
+                            value={selectedCatalogValue}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setMatCatalogChoice(v);
+                              const item = inventory.find((it) => it.name === v);
+                              if (item) setMatUnit(item.unit);
+                            }}
+                            style={styles.formInput}
+                          >
+                            {inventory.map((it) => {
+                              const used = materialsUsedByKey.get(normalizeName(it.name)) || 0;
+                              const remaining = it.initialQuantity - used;
+                              return (
+                                <option key={it.id} value={it.name}>
+                                  {it.name} (quedan {remaining} {it.unit})
+                                </option>
+                              );
+                            })}
+                            <option value={OTHER_MATERIAL_OPTION}>{OTHER_MATERIAL_OPTION}</option>
+                          </select>
+                          {isOtherMaterial && (
+                            <input
+                              autoFocus
+                              value={matName}
+                              onChange={(e) => setMatName(e.target.value)}
+                              placeholder="Insumo * (ej: hélice, batería 4S)"
+                              style={{ ...styles.formInput, marginTop: 6 }}
+                            />
+                          )}
+                        </>
+                      ) : (
+                        <input value={matName} onChange={(e) => setMatName(e.target.value)} placeholder="Insumo * (ej: hélice, batería 4S)" style={styles.formInput} />
+                      )}
                       <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                         <input
                           type="number"
@@ -1342,10 +2070,11 @@ function DetailPanel({
                         />
                         <input value={matUnit} onChange={(e) => setMatUnit(e.target.value)} placeholder="unidad" style={{ ...styles.formInput, width: 90 }} />
                         <button
-                          style={{ ...styles.ghostBtn, flex: 1, opacity: matName.trim() ? 1 : 0.4 }}
-                          disabled={!matName.trim()}
+                          style={{ ...styles.ghostBtn, flex: 1 }}
                           onClick={() => {
-                            onAddMaterial(drone.id, { name: matName, quantity: Number(matQty) || 0, unit: matUnit });
+                            const finalName = isOtherMaterial ? matName : selectedCatalogValue;
+                            onAddMaterial(drone.id, { name: finalName, quantity: Number(matQty) || 0, unit: matUnit });
+                            setMatCatalogChoice("");
                             setMatName("");
                             setMatQty("1");
                             setMatUnit("u");
@@ -1396,14 +2125,13 @@ function DetailPanel({
                           step="0.5"
                           value={laborHours}
                           onChange={(e) => setLaborHours(e.target.value)}
-                          placeholder="Horas"
+                          placeholder="Horas *"
                           style={{ ...styles.formInput, width: 80 }}
                         />
                         <input value={laborDesc} onChange={(e) => setLaborDesc(e.target.value)} placeholder="Descripción (opcional)" style={styles.formInput} />
                       </div>
                       <button
-                        style={{ ...styles.ghostBtn, width: "100%", marginTop: 6, opacity: Number(laborHours) > 0 ? 1 : 0.4 }}
-                        disabled={!(Number(laborHours) > 0)}
+                        style={{ ...styles.ghostBtn, width: "100%", marginTop: 6 }}
                         onClick={() => {
                           onAddLabor(drone.id, { hours: Number(laborHours), description: laborDesc });
                           setLaborHours("");
@@ -1516,6 +2244,31 @@ const styles = {
     padding: "7px 10px",
     fontFamily: FONT_MONO,
   },
+  toast: {
+    position: "fixed",
+    top: 16,
+    left: "50%",
+    transform: "translateX(-50%)",
+    zIndex: 100,
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    border: "1px solid",
+    borderRadius: 9,
+    padding: "10px 12px",
+    maxWidth: "90vw",
+    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+    fontFamily: "'Inter', sans-serif",
+  },
+  toastText: { fontSize: 12.5, lineHeight: 1.4 },
+  toastClose: { background: "transparent", border: "none", cursor: "pointer", padding: 2, flexShrink: 0, display: "flex" },
+  analyticsList: { display: "flex", flexDirection: "column", gap: 14, maxHeight: 420, overflowY: "auto" },
+  analyticsRow: { display: "flex", gap: 10, alignItems: "flex-start" },
+  analyticsRank: { fontSize: 12, color: "#D4AF37", fontFamily: FONT_MONO, fontWeight: 600, width: 26, flexShrink: 0, paddingTop: 1 },
+  analyticsName: { fontSize: 13, fontWeight: 500, marginBottom: 5, textTransform: "capitalize" },
+  analyticsBarTrack: { height: 6, background: "#0A1220", borderRadius: 3, overflow: "hidden", marginBottom: 5 },
+  analyticsBarFill: { height: "100%", background: "linear-gradient(90deg, #C9A227, #E8C158)", borderRadius: 3 },
+  analyticsMeta: { fontSize: 10.5, color: "#8B92A3", fontFamily: FONT_MONO, lineHeight: 1.5 },
   appShell: {
     background: "#0A1220",
     minHeight: "100vh",
@@ -1582,6 +2335,28 @@ const styles = {
   lineCount: { fontSize: 13, fontWeight: 600, fontFamily: FONT_MONO, marginTop: -3 },
   loadingRow: { display: "flex", alignItems: "center", gap: 8, color: "#8B92A3", fontSize: 13, padding: "40px 0", justifyContent: "center" },
   board: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 },
+  dispatchedSection: { marginTop: 22, paddingTop: 18, borderTop: "1px dashed #1E3350" },
+  dispatchedHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 12,
+    fontWeight: 500,
+    color: "#D4AF37",
+    fontFamily: FONT_MONO,
+    marginBottom: 12,
+  },
+  dispatchedGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 },
+  dispatchedCard: {
+    background: "#122238",
+    border: "1px solid #1C2E4A",
+    borderLeft: "3px solid #D4AF37",
+    borderRadius: 8,
+    padding: "9px 11px",
+    cursor: "pointer",
+    opacity: 0.85,
+  },
+  dispatchedMeta: { fontSize: 10.5, color: "#8B92A3", fontFamily: FONT_MONO, marginTop: 6 },
   column: { background: "#0D1A2C", border: "1px solid #16273F", borderRadius: 10, display: "flex", flexDirection: "column", minHeight: 260, maxHeight: 560 },
   columnHeader: { display: "flex", alignItems: "center", gap: 6, padding: "10px 12px", borderBottom: "1px solid #16273F" },
   columnTitle: { fontSize: 12, fontWeight: 500, fontFamily: FONT_MONO, letterSpacing: 0.2, flex: 1 },
@@ -1635,6 +2410,13 @@ const styles = {
   emptyBody: { fontSize: 12.5, color: "#8B92A3", maxWidth: 320, marginBottom: 10, lineHeight: 1.5 },
   overlay: { position: "fixed", inset: 0, background: "rgba(8,9,11,0.6)", display: "flex", alignItems: "center", justifyContent: "flex-end", zIndex: 50 },
   modal: { background: "#101E33", border: "1px solid #1E3350", borderRadius: 12, padding: 20, width: 380, maxWidth: "92vw", margin: "auto" },
+  analyticsModal: { width: 760, maxWidth: "94vw", maxHeight: "88vh", overflowY: "auto" },
+  chartsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14 },
+  chartCard: { background: "#0C1728", border: "1px solid #1E3350", borderRadius: 10, padding: "14px 14px 6px" },
+  chartCardTitle: { fontFamily: FONT_HEAD, fontSize: 13, letterSpacing: 0.3, color: "#E7EAF2", marginBottom: 8 },
+  statTile: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "18px 0" },
+  statTileValue: { fontFamily: FONT_HEAD, fontSize: 34, color: "#D4AF37", lineHeight: 1 },
+  statTileLabel: { fontSize: 12, color: "#8B92A3", marginTop: 6 },
   sidePanel: { background: "#101E33", border: "1px solid #1E3350", borderRadius: "12px 0 0 12px", padding: 20, width: 380, maxWidth: "92vw", height: "100%", maxHeight: "100vh", overflowY: "auto" },
   modalHeader: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 },
   modalTitle: { fontFamily: FONT_HEAD, fontSize: 16, fontWeight: 600 },
