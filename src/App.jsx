@@ -135,7 +135,7 @@ function generateDispatchPdf(drone, dispatch) {
     y += 7;
   };
 
-  row("Identificador", drone.name);
+  row("Serial o Placa FAC", drone.name);
   row("Modelo", drone.model);
   row("Procedencia / UMA", drone.origin);
   row("Técnico asignado", drone.technician);
@@ -203,7 +203,7 @@ function generateDispatchPdf(drone, dispatch) {
   doc.line(120, y, 192, y);
   y += 5;
   doc.setFontSize(9);
-  doc.text("Firma jefe de taller / administrador", marginX, y);
+  doc.text("Firma jefe de taller", marginX, y);
   doc.text("Firma técnico responsable", 120, y);
 
   doc.setFontSize(8);
@@ -1552,7 +1552,7 @@ function NewDroneModal({ onClose, onCreate, defaultTech }) {
         </div>
         <div style={styles.formField}>
           <label style={styles.formLabel}>Identificador *</label>
-          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej: DJI-014 / Cliente Andina Films" style={styles.formInput} />
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej: FAC7000" style={styles.formInput} />
         </div>
         <div style={styles.formField}>
           <label style={styles.formLabel}>Tipo de equipo / modelo *</label>
