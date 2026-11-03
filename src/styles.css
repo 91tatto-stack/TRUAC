@@ -32,3 +32,40 @@ body {
     transform: rotate(360deg);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Celular y tablet                                                    */
+/* ------------------------------------------------------------------ */
+
+@media (max-width: 1000px) {
+  .truac-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .truac-shell {
+    padding: 16px 14px 32px !important;
+  }
+  .truac-board {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .truac-header-right {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .truac-column {
+    min-height: 0 !important;
+  }
+  .truac-kpi-value {
+    font-size: 19px !important;
+  }
+}
+
+input[type="date"] {
+  color-scheme: dark;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
