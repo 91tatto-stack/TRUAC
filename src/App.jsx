@@ -1340,7 +1340,7 @@ function NewDroneModal({ onClose, onCreate, defaultTech }) {
         </div>
         <div style={styles.formField}>
           <label style={styles.formLabel}>Identificador *</label>
-          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej: DJI-014 / Cliente Andina Films" style={styles.formInput} />
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej: FAC-7001  O S/N" style={styles.formInput} />
         </div>
         <div style={styles.formField}>
           <label style={styles.formLabel}>Tipo de equipo / modelo *</label>
