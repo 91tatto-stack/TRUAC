@@ -1,21 +1,118 @@
 rules_version = '2';
+
+// Reglas de seguridad de TRUAC.
+//
+// Sin sesión iniciada (Firebase Authentication) NO se puede leer ni escribir
+// nada. Cada persona tiene un perfil en usuarios/{uid} con su nombre, rol y si
+// está activa. Las reglas leen ese perfil para decidir qué puede hacer.
+//
+//   usuarios/{uid}   -> perfiles (solo el administrador los crea o cambia)
+//   logins/{usuario} -> qué cuenta interna corresponde a cada nombre de usuario
+//                       (se puede consultar uno por uno para iniciar sesión,
+//                       pero NO listar; solo el administrador los escribe)
+//   taller/flota     -> drones del tablero          (todo usuario activo)
+//   taller/config    -> logo                        (solo administrador escribe)
+//   taller/insumos   -> inventario                  (jefe de taller y administrador;
+//                                                    el técnico solo puede AGREGAR
+//                                                    una salida a su nombre)
+//   taller/gastos    -> gastos y presupuesto        (jefe de taller y administrador;
+//                                                    solo el administrador borra)
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Cualquiera con el link de tu sitio puede leer y escribir el documento
-    // de la flota. El PIN de la app es solo una barrera de uso, no de base
-    // de datos: quien conozca la URL de Firestore podría saltarla. Para uso
-    // interno de un taller esto suele ser suficiente; ver README para
-    // opciones más estrictas.
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function profilePath() {
+      return /databases/$(database)/documents/usuarios/$(request.auth.uid);
+    }
+    function me() {
+      return get(profilePath()).data;
+    }
+    function active() {
+      return signedIn() && exists(profilePath()) && me().activo == true;
+    }
+    function isAdmin() {
+      return active() && me().rol == 'administrador';
+    }
+    function isManager() {
+      return active() && me().rol in ['jefe_taller', 'administrador'];
+    }
+
+    // Un técnico solo puede agregar UNA salida de inventario, a su propio
+    // nombre, sin tocar nada más del documento ni los movimientos anteriores.
+    function technicianUsesSupply() {
+      let before = resource.data.get('movements', []);
+      let after = request.resource.data.get('movements', []);
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['movements'])
+        && after.size() == before.size() + 1
+        && after[0:before.size()] == before
+        && after[before.size()].type == 'salida'
+        && after[before.size()].by == me().nombre;
+    }
+
+    // ---------------- Usuarios ----------------
+    match /usuarios/{uid} {
+      // Cada quien puede leer su propio perfil (para saber si está activo);
+      // los usuarios activos ven la lista (para asignar técnicos a un dron).
+      allow read: if (signedIn() && request.auth.uid == uid) || active();
+      allow create: if isAdmin()
+        && request.resource.data.rol in ['tecnico', 'jefe_taller', 'administrador']
+        && request.resource.data.activo is bool;
+      // El administrador no puede cambiarse el rol ni desactivarse a sí mismo
+      // (así nunca se queda el taller sin administrador por accidente).
+      allow update: if isAdmin()
+        && request.resource.data.rol in ['tecnico', 'jefe_taller', 'administrador']
+        && (uid != request.auth.uid
+            || (request.resource.data.rol == resource.data.rol
+                && request.resource.data.activo == resource.data.activo));
+      // Cada usuario puede marcar que ya cambió su contraseña (y nada más).
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['debeCambiarClave', 'claveCambiada'])
+        && request.resource.data.debeCambiarClave == false;
+      allow delete: if false; // se desactivan, no se borran (se conserva el historial)
+    }
+
+    // ---------------- Inicio de sesión por usuario ----------------
+    match /logins/{usuario} {
+      allow get: if true;      // necesario ANTES de iniciar sesión
+      allow list: if false;    // nadie puede sacar la lista de usuarios
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['email', 'uid'])
+        && exists(/databases/$(database)/documents/usuarios/$(request.resource.data.uid));
+      allow delete: if false;
+    }
+
+    // ---------------- Taller ----------------
     match /taller/flota {
-      allow read, write: if true;
+      allow read, write: if active();
     }
-    // Guarda la lista de nombres de técnicos que se muestra al iniciar sesión.
+
     match /taller/config {
-      allow read, write: if true;
+      allow read: if active();
+      allow write: if isAdmin();
     }
-    // Catálogo editable de piezas/insumos e inventario ("Quedan: X").
-    match /taller/inventario {
-      allow read, write: if true;
+
+    match /taller/insumos {
+      allow read: if active();
+      allow create, update: if isManager();
+      allow update: if active() && technicianUsesSupply();
+      allow delete: if false;
+    }
+
+    match /taller/gastos {
+      allow read: if active();
+      allow write: if isAdmin();
+      // El jefe de taller puede registrar gastos y presupuesto, pero no borrar gastos.
+      allow create: if isManager();
+      allow update: if isManager()
+        && request.resource.data.get('expenses', []).size() >= resource.data.get('expenses', []).size();
+    }
+
+    // Todo lo demás: cerrado.
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
