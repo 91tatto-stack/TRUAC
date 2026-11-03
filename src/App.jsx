@@ -375,7 +375,7 @@ function LoginGate() {
           value={usuario}
           onChange={(ev) => setUsuario(ev.target.value)}
           onKeyDown={(ev) => ev.key === "Enter" && submit()}
-          placeholder="Ej: cperez"
+          placeholder="."
           style={styles.formInput}
         />
 
