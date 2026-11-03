@@ -313,7 +313,7 @@ function UserFormModal({ mode, target, usuarios, session, notify, onClose, onCre
             value={usuario}
             disabled={fixedUsername}
             onChange={(e) => setUsuario(e.target.value.toLowerCase().replace(/\s/g, ""))}
-            placeholder="Ej: cperez"
+            placeholder=""
             autoComplete="off"
             style={{ ...styles.formInput, ...mono, opacity: fixedUsername ? 0.7 : 1 }}
           />
